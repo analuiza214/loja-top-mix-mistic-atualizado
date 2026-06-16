@@ -31,6 +31,20 @@ function httpsRequest(url, method, data, headers) {
   });
 }
 
+// Gera um CPF válido aleatório para uso quando o cliente não informar
+function gerarCpfAleatorio() {
+  const rand = () => Math.floor(Math.random() * 9);
+  const d = Array.from({ length: 9 }, rand);
+
+  let sum = d.reduce((acc, v, i) => acc + v * (10 - i), 0);
+  d.push(((sum * 10) % 11) % 10);
+
+  sum = d.reduce((acc, v, i) => acc + v * (11 - i), 0);
+  d.push(((sum * 10) % 11) % 10);
+
+  return d.join("");
+}
+
 exports.handler = async (event) => {
   const corsHeaders = {
     "Access-Control-Allow-Origin": "*",
@@ -66,11 +80,9 @@ exports.handler = async (event) => {
     return { statusCode: 400, headers: corsHeaders, body: JSON.stringify({ error: "Campos obrigatórios: amount, name." }) };
   }
 
-  // CPF é obrigatório pela MisticPay
+  // Se o cliente não informou CPF, gera um válido para o gateway
   const cpfDigits = document ? String(document).replace(/\D/g, "") : "";
-  if (cpfDigits.length < 11) {
-    return { statusCode: 400, headers: corsHeaders, body: JSON.stringify({ error: "CPF obrigatório para gerar o PIX." }) };
-  }
+  const payerDocument = cpfDigits.length === 11 ? cpfDigits : gerarCpfAleatorio();
 
   const transactionId = `order-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
@@ -80,7 +92,7 @@ exports.handler = async (event) => {
   const payload = {
     amount: Number(amount),
     payerName: name,
-    payerDocument: cpfDigits,
+    payerDocument,
     transactionId,
     description: productName || "Kit Álbum Copa Do Mundo 2026 Capa Mole + 250 Figurinhas Panini",
     ...(webhookUrl ? { projectWebhook: webhookUrl } : {}),
@@ -114,9 +126,9 @@ exports.handler = async (event) => {
       return { statusCode: 502, headers: corsHeaders, body: JSON.stringify({ error: "Resposta inválida do gateway." }) };
     }
 
-    const pixCode = data.copyPaste || data.pixCopiaECola || data.emv || data.brCode || data.pixCode || null;
-    const qrCodeBase64 = data.qrCodeBase64 || data.qrcodeBase64 || null;
-    const qrCodeImage = data.qrcodeUrl || data.qrCodeUrl || data.qrCodeImage || null;
+    const pixCode = data.qrCode || data.copyPaste || data.pixCopiaECola || data.emv || data.brCode || data.pixCode || null;
+    const qrCodeBase64 = data.qrCodeImage || data.qrCodeBase64 || data.qrcodeBase64 || null;
+    const qrCodeImage = data.qrcodeUrl || data.qrCodeUrl || null;
     const tid = data.transactionId || data.id || data.externalId || transactionId;
 
     if (!pixCode) {

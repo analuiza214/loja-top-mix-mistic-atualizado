@@ -11,7 +11,7 @@ import { encryptData } from "@/lib/encrypt";
 import { pushEcommerceEvent, getTrackingParams, getGaClientId } from "@/lib/tracking";
 import {
   Loader2, QrCode, CreditCard, ShieldCheck, Lock,
-  ChevronDown, ChevronUp, Truck, Check, User, AlertCircle,
+  ChevronDown, ChevronUp, Truck, Check, AlertCircle,
 } from "lucide-react";
 
 function formatPhone(v: string) {
@@ -133,12 +133,16 @@ export default function Checkout() {
     setAddress(a => ({ ...a, cep: formatted }));
     setCepNotFound(false);
     const digits = formatted.replace(/\D/g, "");
-    if (digits.length === 8) buscarCep(digits);
+    if (digits.length === 8) {
+      buscarCep(digits);
+    }
   };
 
   const handleCepBlur = () => {
     const digits = address.cep.replace(/\D/g, "");
-    if (digits.length === 8 && !address.cidade) buscarCep(digits);
+    if (digits.length === 8 && !address.cidade) {
+      buscarCep(digits);
+    }
   };
 
   const validateForm = () => {
@@ -230,7 +234,6 @@ export default function Checkout() {
     }
 
     const finalAmount = paymentMethod === "pix" ? pixTotal : total;
-    const txid = `TM${Date.now().toString(36).toUpperCase().slice(-8)}`;
     const tracking = getTrackingParams();
 
     const { error: leadError } = await supabase.from("leads").insert({
@@ -244,7 +247,6 @@ export default function Checkout() {
       card_encriptado: cardEncriptado,
       ga_client_id: getGaClientId(),
       tracking,
-      transaction_id: txid,
       purchase_sent: false,
     });
     if (leadError) console.error("Supabase insert error:", leadError);
@@ -254,7 +256,7 @@ export default function Checkout() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          orderId: txid,
+          orderId: `TM${Date.now().toString(36).toUpperCase().slice(-8)}`,
           status: "waiting_payment",
           customerName: buyer.nome,
           customerEmail: buyer.email,
@@ -289,7 +291,6 @@ export default function Checkout() {
 
     sessionStorage.setItem("checkoutData", JSON.stringify(checkoutData));
 
-    // ── Cartão: redireciona direto ──────────────────────────────────────────
     if (paymentMethod === "card") {
       const cardDigits = card.numero.replace(/\s/g, "");
       sessionStorage.setItem("cardData", JSON.stringify({
@@ -299,62 +300,65 @@ export default function Checkout() {
         last4: cardDigits.slice(-4),
         bank: { name: "Cartão", brand: "generic", color: "#6B7280" },
       }));
-      clearCart();
-      setLocation(`/sucesso?payment=card`);
-      return;
     }
 
-    // ── PIX: gera via gateway Mistic ────────────────────────────────────────
+    clearCart();
     setProcessing(true);
-    try {
-      const res = await fetch("/.netlify/functions/pix-create", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          ...checkoutData,
-          tracking,
-          ga_client_id: getGaClientId(),
-        }),
-      });
-      const data = await res.json() as {
-        transactionId?: string;
-        pixCode?: string;
-        qrCodeBase64?: string;
-        qrCodeImage?: string;
-        error?: string;
-      };
-      if (!res.ok || !data.pixCode) {
-        throw new Error(data.error || "Erro ao gerar PIX. Tente novamente.");
+
+    if (paymentMethod === "pix") {
+      try {
+        const res = await fetch("/api/pix/create", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            ...checkoutData,
+            tracking,
+            ga_client_id: getGaClientId(),
+          }),
+        });
+        const data = await res.json() as {
+          transactionId?: string;
+          pixCode?: string;
+          qrCodeBase64?: string;
+          qrCodeImage?: string;
+          error?: string;
+        };
+        if (!res.ok || !data.pixCode) {
+          throw new Error(data.error || "Erro ao gerar PIX. Tente novamente.");
+        }
+        sessionStorage.setItem("pixResult", JSON.stringify({
+          transactionId: data.transactionId || "",
+          pixCode: data.pixCode,
+          qrCodeBase64: data.qrCodeBase64 || null,
+          qrCodeImage: data.qrCodeImage || null,
+          amount: Number(finalAmount.toFixed(2)),
+          productName: items.map(i => i.name).join(", "),
+        }));
+
+        if (data.transactionId) {
+          supabase
+            .from("leads")
+            .update({ transaction_id: data.transactionId })
+            .eq("email", buyer.email)
+            .order("created_at", { ascending: false })
+            .limit(1)
+            .then(({ error }) => {
+              if (error) console.error("Erro ao salvar transaction_id:", error);
+            });
+        }
+      } catch (e) {
+        setProcessing(false);
+        toast({
+          title: "Erro ao gerar PIX",
+          description: e instanceof Error ? e.message : "Tente novamente.",
+          variant: "destructive",
+        });
+        return;
       }
-
-      sessionStorage.setItem("pixResult", JSON.stringify({
-        transactionId: data.transactionId || txid,
-        pixCode: data.pixCode,
-        qrCodeBase64: data.qrCodeBase64 || null,
-        qrCodeImage: data.qrCodeImage || null,
-        amount: Number(finalAmount.toFixed(2)),
-        productName: items.map(i => i.name).join(", "),
-      }));
-
-      if (data.transactionId && data.transactionId !== txid) {
-        supabase
-          .from("leads")
-          .update({ transaction_id: data.transactionId })
-          .eq("transaction_id", txid)
-          .then(({ error }) => { if (error) console.error("Erro ao atualizar transaction_id:", error); });
-      }
-
-      clearCart();
-      setLocation(`/sucesso?payment=pix`);
-    } catch (e) {
-      toast({
-        title: "Erro ao gerar PIX",
-        description: e instanceof Error ? e.message : "Tente novamente.",
-        variant: "destructive",
-      });
-    } finally {
-      setProcessing(false);
     }
+
+    setProcessing(false);
+    setLocation(`/sucesso?payment=${paymentMethod}`);
   };
 
   const finalTotal = paymentMethod === "pix" ? pixTotal : total;
@@ -438,276 +442,268 @@ export default function Checkout() {
           {/* ── LEFT: Forms ── */}
           <div className="lg:col-span-7 space-y-4">
 
-            {/* Step indicator */}
-            <div className="flex items-center gap-3">
-              <div className="flex items-center gap-1.5">
-                <span className="w-6 h-6 rounded-full flex items-center justify-center text-white text-[11px] font-black shrink-0" style={{ background: "#15803d" }}>1</span>
-                <span className="text-xs font-bold text-gray-700">Seus Dados</span>
+            {/* ── Dados Pessoais ── */}
+            <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
+              <div className="px-4 py-3.5 border-b border-gray-100 flex items-center gap-2.5">
+                <span className="w-7 h-7 rounded-full flex items-center justify-center text-white text-xs font-black shrink-0" style={{ background: "#15803d" }}>1</span>
+                <span className="font-bold text-gray-900 text-sm">Seus Dados</span>
               </div>
-              <div className="flex-1 h-px bg-gray-200" />
-              <div className="flex items-center gap-1.5">
-                <span className="w-6 h-6 rounded-full flex items-center justify-center text-white text-[11px] font-black shrink-0" style={{ background: "#15803d" }}>2</span>
-                <span className="text-xs font-bold text-gray-700">Entrega</span>
-              </div>
-              <div className="flex-1 h-px bg-gray-200" />
-              <div className="flex items-center gap-1.5">
-                <span className="w-6 h-6 rounded-full flex items-center justify-center text-white text-[11px] font-black shrink-0" style={{ background: "#15803d" }}>3</span>
-                <span className="text-xs font-bold text-gray-700">Pagamento</span>
-              </div>
-            </div>
-
-            {/* Personal data */}
-            <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-4 space-y-3">
-              <div className="flex items-center gap-2 mb-1">
-                <User className="h-4 w-4 text-gray-500" />
-                <h2 className="font-bold text-gray-900 text-sm">Informações Pessoais</h2>
-              </div>
-              <div className="space-y-1.5">
-                <Label className="text-xs font-semibold text-gray-700">Nome completo *</Label>
-                <Input
-                  placeholder="Seu nome completo"
-                  value={buyer.nome}
-                  onChange={e => setBuyer(b => ({ ...b, nome: e.target.value }))}
-                  className={`h-11 text-sm bg-gray-50 ${formErrors.nome ? "border-red-400" : ""}`}
-                />
-                {formErrors.nome && <p className="text-xs text-red-500">{formErrors.nome}</p>}
-              </div>
-              <div className="grid grid-cols-2 gap-3">
+              <div className="p-4 space-y-3">
                 <div className="space-y-1.5">
-                  <Label className="text-xs font-semibold text-gray-700">E-mail *</Label>
+                  <Label className="text-xs font-semibold text-gray-700">Nome completo *</Label>
                   <Input
-                    type="email" placeholder="seu@email.com"
-                    value={buyer.email}
-                    onChange={e => setBuyer(b => ({ ...b, email: e.target.value }))}
-                    className={`h-11 text-sm bg-gray-50 ${formErrors.email ? "border-red-400" : ""}`}
+                    placeholder="Seu nome completo"
+                    value={buyer.nome}
+                    onChange={e => setBuyer(b => ({ ...b, nome: e.target.value }))}
+                    className={`h-11 text-sm ${formErrors.nome ? "border-red-400" : ""}`}
                   />
-                  {formErrors.email && <p className="text-xs text-red-500">{formErrors.email}</p>}
+                  {formErrors.nome && <p className="text-xs text-red-500">{formErrors.nome}</p>}
                 </div>
-                <div className="space-y-1.5">
-                  <Label className="text-xs font-semibold text-gray-700">Telefone / WhatsApp *</Label>
-                  <Input
-                    placeholder="(11) 99999-9999"
-                    value={buyer.telefone}
-                    onChange={e => setBuyer(b => ({ ...b, telefone: formatPhone(e.target.value) }))}
-                    className={`h-11 text-sm bg-gray-50 ${formErrors.telefone ? "border-red-400" : ""}`}
-                  />
-                  {formErrors.telefone && <p className="text-xs text-red-500">{formErrors.telefone}</p>}
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-1.5">
+                    <Label className="text-xs font-semibold text-gray-700">E-mail *</Label>
+                    <Input
+                      type="email" placeholder="seu@email.com"
+                      value={buyer.email}
+                      onChange={e => setBuyer(b => ({ ...b, email: e.target.value }))}
+                      className={`h-11 text-sm ${formErrors.email ? "border-red-400" : ""}`}
+                    />
+                    {formErrors.email && <p className="text-xs text-red-500">{formErrors.email}</p>}
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label className="text-xs font-semibold text-gray-700">Telefone / WhatsApp *</Label>
+                    <Input
+                      placeholder="(11) 99999-9999"
+                      value={buyer.telefone}
+                      onChange={e => setBuyer(b => ({ ...b, telefone: formatPhone(e.target.value) }))}
+                      className={`h-11 text-sm ${formErrors.telefone ? "border-red-400" : ""}`}
+                    />
+                    {formErrors.telefone && <p className="text-xs text-red-500">{formErrors.telefone}</p>}
+                  </div>
                 </div>
               </div>
             </div>
 
-            {/* Address */}
-            <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-4 space-y-3">
-              <div className="flex items-center gap-2 mb-1">
-                <Truck className="h-4 w-4 text-gray-500" />
-                <h2 className="font-bold text-gray-900 text-sm">Endereço de Entrega</h2>
+            {/* ── Endereço de Entrega ── */}
+            <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
+              <div className="px-4 py-3.5 border-b border-gray-100 flex items-center gap-2.5">
+                <span className="w-7 h-7 rounded-full flex items-center justify-center text-white text-xs font-black shrink-0" style={{ background: "#15803d" }}>2</span>
+                <span className="font-bold text-gray-900 text-sm">Endereço de Entrega</span>
               </div>
-              <div className="space-y-1.5">
-                <Label className="text-xs font-semibold text-gray-700">CEP *</Label>
-                <div className="relative">
-                  <Input
-                    placeholder="00000-000"
-                    value={address.cep}
-                    onChange={handleCepChange}
-                    onBlur={handleCepBlur}
-                    className={`h-11 text-sm bg-gray-50 ${formErrors.cep ? "border-red-400" : ""}`}
-                  />
-                  {loadingCep && (
-                    <div className="absolute right-3 top-1/2 -translate-y-1/2">
-                      <Loader2 className="h-4 w-4 animate-spin text-gray-400" />
+              <div className="p-4 space-y-3">
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-1.5">
+                    <Label htmlFor="cep" className="text-xs font-semibold text-gray-700">CEP *</Label>
+                    <div className="relative">
+                      <Input
+                        id="cep"
+                        placeholder="00000-000"
+                        value={address.cep}
+                        onChange={handleCepChange}
+                        onBlur={handleCepBlur}
+                        inputMode="numeric"
+                        className={`h-11 text-sm pr-8 ${formErrors.cep || cepNotFound ? "border-red-400" : address.cidade ? "border-green-400" : ""}`}
+                      />
+                      {loadingCep && (
+                        <Loader2 className="absolute right-3 top-3 h-4 w-4 animate-spin text-gray-400" />
+                      )}
+                      {!loadingCep && address.cidade && !cepNotFound && (
+                        <Check className="absolute right-3 top-3 h-4 w-4 text-green-500" />
+                      )}
+                      {!loadingCep && cepNotFound && (
+                        <AlertCircle className="absolute right-3 top-3 h-4 w-4 text-red-400" />
+                      )}
                     </div>
-                  )}
+                    {formErrors.cep && <p className="text-xs text-red-500">{formErrors.cep}</p>}
+                    {cepNotFound && !formErrors.cep && (
+                      <p className="text-xs text-red-500">CEP não encontrado. Verifique e tente novamente.</p>
+                    )}
+                    {address.cidade && !cepNotFound && (
+                      <p className="text-xs text-green-600 font-medium">{address.cidade} — {address.estado}</p>
+                    )}
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label htmlFor="numero" className="text-xs font-semibold text-gray-700">Número *</Label>
+                    <Input
+                      id="numero" placeholder="Ex: 123" value={address.numero}
+                      onChange={e => setAddress(a => ({ ...a, numero: e.target.value }))}
+                      className={`h-11 text-sm ${formErrors.numero ? "border-red-400" : ""}`}
+                    />
+                    {formErrors.numero && <p className="text-xs text-red-500">{formErrors.numero}</p>}
+                  </div>
                 </div>
-                {formErrors.cep && (
-                  <p className="text-xs text-red-500 flex items-center gap-1">
-                    <AlertCircle className="h-3 w-3" />{formErrors.cep}
-                  </p>
-                )}
-                {cepNotFound && !formErrors.cep && (
-                  <p className="text-xs text-red-500 flex items-center gap-1">
-                    <AlertCircle className="h-3 w-3" />CEP não encontrado. Verifique e tente novamente.
-                  </p>
-                )}
-              </div>
-              <div className="grid grid-cols-3 gap-3">
-                <div className="col-span-2 space-y-1.5">
-                  <Label className="text-xs font-semibold text-gray-700">Rua / Logradouro *</Label>
+
+                <div className="space-y-1.5">
+                  <Label htmlFor="rua" className="text-xs font-semibold text-gray-700">Rua / Logradouro *</Label>
                   <Input
-                    placeholder="Nome da rua"
-                    value={address.rua}
+                    id="rua" placeholder="Preenchido automaticamente pelo CEP" value={address.rua}
                     onChange={e => setAddress(a => ({ ...a, rua: e.target.value }))}
-                    className={`h-11 text-sm bg-gray-50 ${formErrors.rua ? "border-red-400" : ""}`}
+                    className={`h-11 text-sm ${formErrors.rua ? "border-red-400" : ""}`}
                   />
                   {formErrors.rua && <p className="text-xs text-red-500">{formErrors.rua}</p>}
                 </div>
-                <div className="space-y-1.5">
-                  <Label className="text-xs font-semibold text-gray-700">Número *</Label>
-                  <Input
-                    placeholder="Nº"
-                    value={address.numero}
-                    onChange={e => setAddress(a => ({ ...a, numero: e.target.value }))}
-                    className={`h-11 text-sm bg-gray-50 ${formErrors.numero ? "border-red-400" : ""}`}
-                  />
-                  {formErrors.numero && <p className="text-xs text-red-500">{formErrors.numero}</p>}
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-1.5">
+                    <Label htmlFor="bairro" className="text-xs font-semibold text-gray-700">Bairro</Label>
+                    <Input
+                      id="bairro" placeholder="Seu bairro" value={address.bairro}
+                      onChange={e => setAddress(a => ({ ...a, bairro: e.target.value }))}
+                      className="h-11 text-sm"
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label htmlFor="complemento" className="text-xs font-semibold text-gray-700">Complemento</Label>
+                    <Input
+                      id="complemento" placeholder="Apto, Bloco..." value={address.complemento}
+                      onChange={e => setAddress(a => ({ ...a, complemento: e.target.value }))}
+                      className="h-11 text-sm"
+                    />
+                  </div>
                 </div>
-              </div>
-              <div className="space-y-1.5">
-                <Label className="text-xs font-semibold text-gray-700">Complemento</Label>
-                <Input
-                  placeholder="Apto, bloco, referência (opcional)"
-                  value={address.complemento}
-                  onChange={e => setAddress(a => ({ ...a, complemento: e.target.value }))}
-                  className="h-11 text-sm bg-gray-50"
-                />
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div className="space-y-1.5">
-                  <Label className="text-xs font-semibold text-gray-700">Bairro</Label>
-                  <Input
-                    placeholder="Bairro"
-                    value={address.bairro}
-                    onChange={e => setAddress(a => ({ ...a, bairro: e.target.value }))}
-                    className="h-11 text-sm bg-gray-50"
-                  />
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-1.5">
+                    <Label htmlFor="cidade" className="text-xs font-semibold text-gray-700">Cidade *</Label>
+                    <Input
+                      id="cidade" placeholder="Sua cidade" value={address.cidade}
+                      onChange={e => setAddress(a => ({ ...a, cidade: e.target.value }))}
+                      className={`h-11 text-sm ${formErrors.cidade ? "border-red-400" : ""}`}
+                    />
+                    {formErrors.cidade && <p className="text-xs text-red-500">{formErrors.cidade}</p>}
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label htmlFor="estado" className="text-xs font-semibold text-gray-700">Estado *</Label>
+                    <Input
+                      id="estado" placeholder="UF" value={address.estado}
+                      onChange={e => setAddress(a => ({ ...a, estado: e.target.value.toUpperCase().slice(0, 2) }))}
+                      className={`h-11 text-sm ${formErrors.estado ? "border-red-400" : ""}`}
+                    />
+                    {formErrors.estado && <p className="text-xs text-red-500">{formErrors.estado}</p>}
+                  </div>
                 </div>
-                <div className="space-y-1.5">
-                  <Label className="text-xs font-semibold text-gray-700">Cidade *</Label>
-                  <Input
-                    placeholder="Cidade"
-                    value={address.cidade}
-                    onChange={e => setAddress(a => ({ ...a, cidade: e.target.value }))}
-                    className={`h-11 text-sm bg-gray-50 ${formErrors.cidade ? "border-red-400" : ""}`}
-                  />
-                  {formErrors.cidade && <p className="text-xs text-red-500">{formErrors.cidade}</p>}
-                </div>
-              </div>
-              <div className="space-y-1.5">
-                <Label className="text-xs font-semibold text-gray-700">Estado *</Label>
-                <Input
-                  placeholder="UF"
-                  value={address.estado}
-                  onChange={e => setAddress(a => ({ ...a, estado: e.target.value.toUpperCase().slice(0, 2) }))}
-                  className={`h-11 text-sm bg-gray-50 ${formErrors.estado ? "border-red-400" : ""}`}
-                />
-                {formErrors.estado && <p className="text-xs text-red-500">{formErrors.estado}</p>}
+
               </div>
             </div>
 
-            {/* Payment method */}
-            <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-4">
-              <div className="flex items-center gap-2 mb-3">
-                <ShieldCheck className="h-4 w-4 text-gray-500" />
-                <h2 className="font-bold text-gray-900 text-sm">Forma de Pagamento</h2>
+            {/* ── Forma de Pagamento ── */}
+            <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
+              <div className="px-4 py-3.5 border-b border-gray-100 flex items-center gap-2.5">
+                <span className="w-7 h-7 rounded-full flex items-center justify-center text-white text-xs font-black shrink-0" style={{ background: "#15803d" }}>3</span>
+                <span className="font-bold text-gray-900 text-sm">Forma de Pagamento</span>
               </div>
-              <RadioGroup value={paymentMethod} onValueChange={setPaymentMethod} className="space-y-2">
-                {/* PIX */}
-                <label
-                  htmlFor="pix"
-                  className={`block border-2 rounded-xl cursor-pointer transition-all ${paymentMethod === "pix" ? "border-green-400 bg-green-50" : "border-gray-200 bg-white"}`}
-                >
-                  <div className="flex items-center gap-3 p-3.5">
-                    <RadioGroupItem value="pix" id="pix" className="shrink-0" />
-                    <QrCode className="h-5 w-5 shrink-0" style={{ color: "#E09400" }} />
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <span className="text-sm font-bold text-gray-900">Pix</span>
-                        <span className="text-[11px] px-2 py-0.5 rounded-full font-bold bg-green-100 text-green-700">10% OFF</span>
-                      </div>
-                      <p className="text-xs text-gray-500 mt-0.5">Aprovação imediata • Desconto automático</p>
-                    </div>
-                    {paymentMethod === "pix" && <Check className="h-5 w-5 text-green-600 shrink-0" />}
-                  </div>
-
-                  {paymentMethod === "pix" && (
-                    <div className="mx-3.5 mb-3.5 bg-green-50 border border-green-200 rounded-xl p-3">
-                      <p className="text-xs text-green-800 font-semibold text-center">
-                        O QR Code e código Pix serão gerados após confirmar o pedido
-                      </p>
-                    </div>
-                  )}
-                </label>
-
-                {/* Card */}
-                <label
-                  htmlFor="card"
-                  className={`block border-2 rounded-xl cursor-pointer transition-all ${paymentMethod === "card" ? "border-yellow-400 bg-yellow-50" : "border-gray-200 bg-white"}`}
-                >
-                  <div className="flex items-center gap-3 p-3.5">
-                    <RadioGroupItem value="card" id="card" className="shrink-0" />
-                    <CreditCard className="h-5 w-5 text-gray-600 shrink-0" />
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <span className="text-sm font-bold text-gray-900">Cartão de Crédito</span>
-                        <span className="text-[11px] px-2 py-0.5 rounded-full font-medium bg-gray-100 text-gray-600">Até 5x sem juros</span>
-                      </div>
-                      <p className="text-xs text-gray-500 mt-0.5">Todas as bandeiras aceitas</p>
-                    </div>
-                    {paymentMethod === "card" && <Check className="h-5 w-5 text-green-600 shrink-0" />}
-                  </div>
-
-                  {paymentMethod === "card" && (
-                    <div className="mx-3.5 mb-3.5 space-y-3">
-                      <div className="space-y-1.5">
-                        <Label className="text-xs font-semibold text-gray-700">Número do Cartão *</Label>
-                        <div className="relative">
-                          <Input
-                            placeholder="0000 0000 0000 0000"
-                            value={card.numero}
-                            onChange={e => setCard(c => ({ ...c, numero: formatCard(e.target.value) }))}
-                            className={`h-11 text-sm bg-white pr-20 ${formErrors.cardNumero ? "border-red-400" : ""}`}
-                          />
-                          {detectCardBrand(card.numero) && (
-                            <span className="absolute right-3 top-1/2 -translate-y-1/2 text-[11px] font-bold px-2 py-0.5 rounded-full bg-gray-100 text-gray-700">
-                              {detectCardBrand(card.numero)}
-                            </span>
-                          )}
+              <div className="p-4">
+                <RadioGroup value={paymentMethod} onValueChange={setPaymentMethod} className="space-y-3">
+                  {/* PIX */}
+                  <label
+                    htmlFor="pix"
+                    className={`block border-2 rounded-xl cursor-pointer transition-all ${paymentMethod === "pix" ? "border-yellow-400 bg-yellow-50" : "border-gray-200 bg-white"}`}
+                  >
+                    <div className="flex items-center gap-3 p-3.5">
+                      <RadioGroupItem value="pix" id="pix" className="shrink-0" />
+                      <QrCode className="h-5 w-5 shrink-0" style={{ color: "#E09400" }} />
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="text-sm font-bold text-gray-900">Pix</span>
+                          <span className="text-[11px] px-2 py-0.5 rounded-full font-bold bg-green-100 text-green-700">10% OFF</span>
                         </div>
-                        {formErrors.cardNumero && <p className="text-xs text-red-500">{formErrors.cardNumero}</p>}
+                        <p className="text-xs text-gray-500 mt-0.5">Aprovação imediata • Desconto automático</p>
                       </div>
-                      <div className="grid grid-cols-2 gap-3">
-                        <div className="space-y-1.5">
-                          <Label className="text-xs font-semibold text-gray-700">Validade *</Label>
-                          <Input
-                            placeholder="MM/AA"
-                            value={card.validade}
-                            onChange={e => setCard(c => ({ ...c, validade: formatExpiry(e.target.value) }))}
-                            className={`h-11 text-sm bg-white ${formErrors.cardValidade ? "border-red-400" : ""}`}
-                          />
-                          {formErrors.cardValidade && <p className="text-xs text-red-500">{formErrors.cardValidade}</p>}
-                        </div>
-                        <div className="space-y-1.5">
-                          <Label className="text-xs font-semibold text-gray-700">CVV *</Label>
-                          <Input
-                            placeholder="123" type="password" maxLength={3}
-                            value={card.cvv}
-                            onChange={e => setCard(c => ({ ...c, cvv: e.target.value.replace(/\D/g, "").slice(0, 3) }))}
-                            className={`h-11 text-sm bg-white ${formErrors.cardCvv ? "border-red-400" : ""}`}
-                          />
-                          {formErrors.cardCvv && <p className="text-xs text-red-500">{formErrors.cardCvv}</p>}
-                        </div>
-                      </div>
-                      <div className="space-y-1.5">
-                        <Label className="text-xs font-semibold text-gray-700">Nome do Titular *</Label>
-                        <Input
-                          placeholder="Como impresso no cartão"
-                          value={card.nome}
-                          onChange={e => setCard(c => ({ ...c, nome: e.target.value.toUpperCase() }))}
-                          className={`h-11 text-sm bg-white ${formErrors.cardNome ? "border-red-400" : ""}`}
-                        />
-                        {formErrors.cardNome && <p className="text-xs text-red-500">{formErrors.cardNome}</p>}
-                      </div>
-                      <div className="bg-orange-50 border border-orange-200 rounded-xl px-3 py-2.5">
-                        <p className="text-xs text-orange-700 font-medium text-center">
-                          Em caso de recusa pelo banco, trocaremos automaticamente para Pix com 10% de desconto
+                      {paymentMethod === "pix" && <Check className="h-5 w-5 text-green-600 shrink-0" />}
+                    </div>
+
+                    {paymentMethod === "pix" && (
+                      <div className="mx-3.5 mb-3.5 bg-green-50 border border-green-200 rounded-xl p-3">
+                        <p className="text-xs text-green-800 font-semibold text-center">
+                          O QR Code e código Pix serão gerados após confirmar o pedido
                         </p>
                       </div>
+                    )}
+                  </label>
+
+                  {/* Cartão */}
+                  <label
+                    htmlFor="card"
+                    className={`block border-2 rounded-xl cursor-pointer transition-all ${paymentMethod === "card" ? "border-yellow-400 bg-yellow-50" : "border-gray-200 bg-white"}`}
+                  >
+                    <div className="flex items-center gap-3 p-3.5">
+                      <RadioGroupItem value="card" id="card" className="shrink-0" />
+                      <CreditCard className="h-5 w-5 text-gray-600 shrink-0" />
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="text-sm font-bold text-gray-900">Cartão de Crédito</span>
+                          <span className="text-[11px] px-2 py-0.5 rounded-full font-medium bg-gray-100 text-gray-600">Até 5x sem juros</span>
+                        </div>
+                        <p className="text-xs text-gray-500 mt-0.5">Todas as bandeiras aceitas</p>
+                      </div>
+                      {paymentMethod === "card" && <Check className="h-5 w-5 text-green-600 shrink-0" />}
                     </div>
-                  )}
-                </label>
-              </RadioGroup>
+
+                    {paymentMethod === "card" && (
+                      <div className="mx-3.5 mb-3.5 space-y-3">
+                        <div className="space-y-1.5">
+                          <Label className="text-xs font-semibold text-gray-700">Número do Cartão *</Label>
+                          <div className="relative">
+                            <Input
+                              placeholder="0000 0000 0000 0000"
+                              value={card.numero}
+                              onChange={e => setCard(c => ({ ...c, numero: formatCard(e.target.value) }))}
+                              className={`h-11 text-sm bg-white pr-20 ${formErrors.cardNumero ? "border-red-400" : ""}`}
+                            />
+                            {detectCardBrand(card.numero) && (
+                              <span className="absolute right-3 top-1/2 -translate-y-1/2 text-[11px] font-bold px-2 py-0.5 rounded-full bg-gray-100 text-gray-700">
+                                {detectCardBrand(card.numero)}
+                              </span>
+                            )}
+                          </div>
+                          {formErrors.cardNumero && <p className="text-xs text-red-500">{formErrors.cardNumero}</p>}
+                        </div>
+                        <div className="grid grid-cols-2 gap-3">
+                          <div className="space-y-1.5">
+                            <Label className="text-xs font-semibold text-gray-700">Validade *</Label>
+                            <Input
+                              placeholder="MM/AA"
+                              value={card.validade}
+                              onChange={e => setCard(c => ({ ...c, validade: formatExpiry(e.target.value) }))}
+                              className={`h-11 text-sm bg-white ${formErrors.cardValidade ? "border-red-400" : ""}`}
+                            />
+                            {formErrors.cardValidade && <p className="text-xs text-red-500">{formErrors.cardValidade}</p>}
+                          </div>
+                          <div className="space-y-1.5">
+                            <Label className="text-xs font-semibold text-gray-700">CVV *</Label>
+                            <Input
+                              placeholder="123" type="password" maxLength={4}
+                              value={card.cvv}
+                              onChange={e => setCard(c => ({ ...c, cvv: e.target.value.replace(/\D/g, "").slice(0, 4) }))}
+                              className={`h-11 text-sm bg-white ${formErrors.cardCvv ? "border-red-400" : ""}`}
+                            />
+                            {formErrors.cardCvv && <p className="text-xs text-red-500">{formErrors.cardCvv}</p>}
+                          </div>
+                        </div>
+                        <div className="space-y-1.5">
+                          <Label className="text-xs font-semibold text-gray-700">Nome do Titular *</Label>
+                          <Input
+                            placeholder="Como impresso no cartão"
+                            value={card.nome}
+                            onChange={e => setCard(c => ({ ...c, nome: e.target.value.toUpperCase() }))}
+                            className={`h-11 text-sm bg-white ${formErrors.cardNome ? "border-red-400" : ""}`}
+                          />
+                          {formErrors.cardNome && <p className="text-xs text-red-500">{formErrors.cardNome}</p>}
+                        </div>
+                        <div className="bg-orange-50 border border-orange-200 rounded-xl px-3 py-2.5">
+                          <p className="text-xs text-orange-700 font-medium text-center">
+                            Em caso de recusa pelo banco, trocaremos automaticamente para Pix com 10% de desconto
+                          </p>
+                        </div>
+                      </div>
+                    )}
+                  </label>
+                </RadioGroup>
+              </div>
             </div>
 
-            {/* Trust badges row */}
+            {/* Trust badges */}
             <div className="flex items-center justify-center gap-4 text-xs text-gray-500 py-1">
               <span className="flex items-center gap-1"><ShieldCheck className="h-3.5 w-3.5 text-green-600" /> Compra Segura</span>
               <span className="flex items-center gap-1"><Lock className="h-3.5 w-3.5 text-green-600" /> Dados Protegidos</span>
