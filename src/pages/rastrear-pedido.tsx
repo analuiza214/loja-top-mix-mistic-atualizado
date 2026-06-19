@@ -18,11 +18,10 @@ function addDays(date: Date, days: number): Date {
   return new Date(date.getTime() + days * 24 * 60 * 60 * 1000);
 }
 
-// ── Recupera ou cria a data de origem no Supabase ─────────────────────────────
-// Na primeira vez: grava agora. Nas próximas: retorna a data original, de qualquer dispositivo.
-async function getDataOrigem(codigo: string): Promise<Date> {
-  // Tenta buscar a data já salva
-  const { data, error } = await supabase
+// ── Busca a data de origem no Supabase ────────────────────────────────────────
+// Só funciona para códigos gerados pelo admin. Códigos inexistentes retornam null.
+async function getDataOrigem(codigo: string): Promise<Date | null> {
+  const { data } = await supabase
     .from("rastreio_origem")
     .select("origem_at")
     .eq("codigo", codigo)
@@ -32,13 +31,8 @@ async function getDataOrigem(codigo: string): Promise<Date> {
     return new Date(data.origem_at);
   }
 
-  // Primeira vez: registra agora como ponto de partida
-  const agora = new Date();
-  await supabase
-    .from("rastreio_origem")
-    .insert({ codigo, origem_at: agora.toISOString() });
-
-  return agora;
+  // Código não foi gerado pelo admin — nega o rastreio
+  return null;
 }
 
 // ── Gera linha do tempo baseada no tempo real decorrido desde o 1º rastreio ──
@@ -227,8 +221,11 @@ export default function RastrearPedido() {
 
     setLoading(true);
     try {
-      // Busca (ou cria) a data de origem no Supabase — persistente em qualquer dispositivo
       const origem = await getDataOrigem(cod.toUpperCase());
+      if (!origem) {
+        setErro("Código não encontrado. Verifique o código enviado pela Top Mix e tente novamente.");
+        return;
+      }
       setCodigoExibido(cod.toUpperCase());
       setResultado(gerarEtapas(origem));
     } catch {
