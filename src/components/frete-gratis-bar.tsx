@@ -56,7 +56,7 @@ export function FreteGratisBar() {
   }, []);
 
   if (!cidade) return null;
-  if (location === "/sucesso") return null;
+  if (location === "/sucesso" || location === "/rastrear-pedido") return null;
 
   return (
     <div

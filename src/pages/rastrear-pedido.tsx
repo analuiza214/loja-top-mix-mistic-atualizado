@@ -5,6 +5,7 @@ import {
   ShieldCheck, ChevronRight, ArrowLeft, MapPin, Box,
   AlertTriangle, RotateCcw, Warehouse, CreditCard, MessageCircle
 } from "lucide-react";
+import { supabase } from "@/lib/supabase";
 
 // ── Formata data em pt-BR ────────────────────────────────────────────────────
 function fmt(date: Date) {
@@ -17,18 +18,27 @@ function addDays(date: Date, days: number): Date {
   return new Date(date.getTime() + days * 24 * 60 * 60 * 1000);
 }
 
-// ── Recupera ou cria a data de origem do pedido (persistida por código) ───────
-// A origem é o momento EXATO em que a pessoa rastreou pela primeira vez.
-function getDataOrigem(codigo: string): Date {
-  const key = `tm_rastreio_${codigo.toUpperCase()}`;
-  const salvo = localStorage.getItem(key);
-  if (salvo) {
-    return new Date(parseInt(salvo, 10));
+// ── Recupera ou cria a data de origem no Supabase ─────────────────────────────
+// Na primeira vez: grava agora. Nas próximas: retorna a data original, de qualquer dispositivo.
+async function getDataOrigem(codigo: string): Promise<Date> {
+  // Tenta buscar a data já salva
+  const { data, error } = await supabase
+    .from("rastreio_origem")
+    .select("origem_at")
+    .eq("codigo", codigo)
+    .maybeSingle();
+
+  if (data?.origem_at) {
+    return new Date(data.origem_at);
   }
+
   // Primeira vez: registra agora como ponto de partida
-  const origem = new Date();
-  localStorage.setItem(key, origem.getTime().toString());
-  return origem;
+  const agora = new Date();
+  await supabase
+    .from("rastreio_origem")
+    .insert({ codigo, origem_at: agora.toISOString() });
+
+  return agora;
 }
 
 // ── Gera linha do tempo baseada no tempo real decorrido desde o 1º rastreio ──
@@ -42,8 +52,7 @@ function getDataOrigem(codigo: string): Date {
 //   +2d+2h    → Em Trânsito — Retornando ao CD
 //   +3 dias   → Chegou ao Centro de Distribuição
 //   +3d+1h    → Aguardando Taxa de Reenvio
-function gerarEtapas(codigo: string) {
-  const origem = getDataOrigem(codigo);
+function gerarEtapas(origem: Date) {
   const agora  = new Date();
   const minDecorridos = (agora.getTime() - origem.getTime()) / (1000 * 60);
 
@@ -205,7 +214,7 @@ export default function RastrearPedido() {
   const [loading, setLoading] = useState(false);
   const [erro, setErro] = useState("");
 
-  function handleRastrear(e: React.FormEvent) {
+  async function handleRastrear(e: React.FormEvent) {
     e.preventDefault();
     setErro("");
     const cod = codigo.trim();
@@ -217,11 +226,16 @@ export default function RastrearPedido() {
     }
 
     setLoading(true);
-    setTimeout(() => {
-      setLoading(false);
+    try {
+      // Busca (ou cria) a data de origem no Supabase — persistente em qualquer dispositivo
+      const origem = await getDataOrigem(cod.toUpperCase());
       setCodigoExibido(cod.toUpperCase());
-      setResultado(gerarEtapas(cod.toUpperCase()));
-    }, 1200);
+      setResultado(gerarEtapas(origem));
+    } catch {
+      setErro("Erro ao buscar o rastreio. Tente novamente.");
+    } finally {
+      setLoading(false);
+    }
   }
 
   return (
